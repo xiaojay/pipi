@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shlex
+import sys
 from pathlib import Path
+from typing import TextIO
 
-from .agent import CodingAgent
+from .agent import AgentProgressEvent, AgentProgressHandler, CodingAgent, ToolCallProgress, ToolResultProgress, ToolRun
 from .config import resolve_model_config
 from .file_args import process_file_arguments
 from .session import SessionManager
 from .types import ChatMessage, text_part
+
+TOOL_OUTPUT_PREVIEW_LINES = 3
+TOOL_OUTPUT_PREVIEW_CHARS = 240
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -62,8 +68,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.print or args.messages or file_args:
         initial_parts = process_file_arguments(file_args, session_manager.cwd) if file_args else []
         first_message = " ".join(args.messages).strip()
-        result = agent.prompt_text(first_message or "Continue.", extra_parts=initial_parts)
-        print(result.assistant_message.text())
+        result = agent.prompt_text(
+            first_message or "Continue.",
+            extra_parts=initial_parts,
+            progress_handler=_build_progress_handler(sys.stderr),
+        )
+        _print_assistant_text(result.assistant_message.text(), stream=sys.stdout)
         return 0
     return run_repl(agent)
 
@@ -90,10 +100,12 @@ def run_repl(agent: CodingAgent) -> int:
             continue
         file_args, message = _extract_inline_file_args(raw)
         extra_parts = process_file_arguments(file_args, agent.session_manager.cwd) if file_args else []
-        result = agent.prompt_text(message, extra_parts=extra_parts)
-        text = result.assistant_message.text().strip()
-        if text:
-            print(text)
+        result = agent.prompt_text(
+            message,
+            extra_parts=extra_parts,
+            progress_handler=_build_progress_handler(sys.stdout),
+        )
+        _print_assistant_text(result.assistant_message.text(), stream=sys.stdout)
 
 
 def _handle_command(agent: CodingAgent, raw: str) -> bool:
@@ -184,3 +196,44 @@ def _run_shell_command(agent: CodingAgent, command: str, *, include_in_context: 
             ]
         )
         agent.session_manager.append_message(message)
+
+
+def _build_progress_handler(stream: TextIO) -> AgentProgressHandler:
+    def handle(event: AgentProgressEvent) -> None:
+        if isinstance(event, ToolCallProgress):
+            _print_tool_call(event.name, event.arguments, stream=stream)
+        elif isinstance(event, ToolResultProgress):
+            _print_tool_result(event.tool_run, stream=stream)
+
+    return handle
+
+
+def _print_tool_call(name: str, arguments: dict[str, object], *, stream: TextIO) -> None:
+    encoded_arguments = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
+    print(f"[tool] {name} {encoded_arguments}", file=stream, flush=True)
+
+
+def _print_tool_result(tool_run: ToolRun, *, stream: TextIO) -> None:
+    label = "[tool error]" if tool_run.is_error else "[tool result]"
+    print(f"{label} {_summarize_tool_output(tool_run.output_text)}", file=stream, flush=True)
+
+
+def _print_assistant_text(text: str, *, stream: TextIO) -> None:
+    cleaned = text.strip()
+    if cleaned:
+        print(cleaned, file=stream, flush=True)
+
+
+def _summarize_tool_output(text: str) -> str:
+    cleaned = text.strip()
+    if not cleaned:
+        return "(empty)"
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    if not lines:
+        return "(empty)"
+    preview = " | ".join(lines[:TOOL_OUTPUT_PREVIEW_LINES])
+    if len(lines) > TOOL_OUTPUT_PREVIEW_LINES:
+        preview += " ..."
+    if len(preview) > TOOL_OUTPUT_PREVIEW_CHARS:
+        preview = preview[: TOOL_OUTPUT_PREVIEW_CHARS - 3].rstrip() + "..."
+    return preview

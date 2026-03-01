@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeAlias
 
 from .config import ModelConfig
 from .llm import LLMClient, LLMResponse, create_llm_client
@@ -14,6 +15,35 @@ from .tools import ToolDefinition, build_builtin_tools
 class AgentResult:
     assistant_message: ChatMessage
     tool_rounds: int
+    tool_runs: list["ToolRun"]
+
+
+@dataclass
+class ToolRun:
+    name: str
+    arguments: dict[str, Any]
+    message: ChatMessage
+    is_error: bool = False
+
+    @property
+    def output_text(self) -> str:
+        return self.message.text()
+
+
+@dataclass(frozen=True)
+class ToolCallProgress:
+    name: str
+    arguments: dict[str, Any]
+    tool_call_id: str
+
+
+@dataclass(frozen=True)
+class ToolResultProgress:
+    tool_run: ToolRun
+
+
+AgentProgressEvent: TypeAlias = ToolCallProgress | ToolResultProgress
+AgentProgressHandler: TypeAlias = Callable[[AgentProgressEvent], None]
 
 
 class CodingAgent:
@@ -46,10 +76,16 @@ class CodingAgent:
             "Use tools when needed, keep edits precise, and explain concrete outcomes."
         )
 
-    def prompt(self, content: list[ContentPart]) -> AgentResult:
+    def prompt(
+        self,
+        content: list[ContentPart],
+        *,
+        progress_handler: AgentProgressHandler | None = None,
+    ) -> AgentResult:
         user_message = ChatMessage.user(content)
         self.session_manager.append_message(user_message)
         tool_rounds = 0
+        tool_runs: list[ToolRun] = []
         while True:
             context = self.session_manager.build_session_context()
             response = self.llm_client.complete(
@@ -61,19 +97,36 @@ class CodingAgent:
             assistant_message = self._response_to_message(response)
             self.session_manager.append_message(assistant_message)
             if not response.tool_calls:
-                return AgentResult(assistant_message=assistant_message, tool_rounds=tool_rounds)
+                return AgentResult(assistant_message=assistant_message, tool_rounds=tool_rounds, tool_runs=tool_runs)
             tool_rounds += 1
             if tool_rounds > self.max_tool_rounds:
                 raise RuntimeError(f"Exceeded maximum tool rounds ({self.max_tool_rounds})")
             for tool_call in response.tool_calls:
-                tool_message = self._execute_tool_call(tool_call.name, tool_call.id, tool_call.arguments)
-                self.session_manager.append_message(tool_message)
+                if progress_handler:
+                    progress_handler(
+                        ToolCallProgress(
+                            name=tool_call.name,
+                            arguments=tool_call.arguments,
+                            tool_call_id=tool_call.id,
+                        )
+                    )
+                tool_run = self._execute_tool_call(tool_call.name, tool_call.id, tool_call.arguments)
+                tool_runs.append(tool_run)
+                self.session_manager.append_message(tool_run.message)
+                if progress_handler:
+                    progress_handler(ToolResultProgress(tool_run=tool_run))
 
-    def prompt_text(self, text: str, *, extra_parts: list[ContentPart] | None = None) -> AgentResult:
+    def prompt_text(
+        self,
+        text: str,
+        *,
+        extra_parts: list[ContentPart] | None = None,
+        progress_handler: AgentProgressHandler | None = None,
+    ) -> AgentResult:
         parts = [text_part(text)]
         if extra_parts:
             parts.extend(extra_parts)
-        return self.prompt(parts)
+        return self.prompt(parts, progress_handler=progress_handler)
 
     def new_session(self) -> None:
         self.session_manager.new_session()
@@ -97,15 +150,43 @@ class CodingAgent:
             usage=response.usage,
         )
 
-    def _execute_tool_call(self, name: str, tool_call_id: str, arguments: dict[str, Any]) -> ChatMessage:
+    def _execute_tool_call(self, name: str, tool_call_id: str, arguments: dict[str, Any]) -> ToolRun:
         tool = self.tools.get(name)
         if not tool:
-            return ChatMessage.tool_result(tool_call_id, name, f"Unknown tool: {name}")
+            error_text = f"Unknown tool: {name}"
+            return ToolRun(
+                name=name,
+                arguments=arguments,
+                message=ChatMessage(
+                    role="toolResult",
+                    content=[text_part(error_text)],
+                    tool_call_id=tool_call_id,
+                    tool_name=name,
+                    error_message=error_text,
+                ),
+                is_error=True,
+            )
         try:
             result = tool.execute(arguments)
         except Exception as error:
-            return ChatMessage.tool_result(tool_call_id, name, f"Tool {name} failed: {error}")
-        return ChatMessage.tool_result(tool_call_id, name, self._tool_result_to_text(result))
+            error_text = f"Tool {name} failed: {error}"
+            return ToolRun(
+                name=name,
+                arguments=arguments,
+                message=ChatMessage(
+                    role="toolResult",
+                    content=[text_part(error_text)],
+                    tool_call_id=tool_call_id,
+                    tool_name=name,
+                    error_message=error_text,
+                ),
+                is_error=True,
+            )
+        return ToolRun(
+            name=name,
+            arguments=arguments,
+            message=ChatMessage.tool_result(tool_call_id, name, self._tool_result_to_text(result)),
+        )
 
     def _tool_result_to_text(self, result: ToolExecutionResult) -> str:
         text = result.text
