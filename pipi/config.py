@@ -8,21 +8,35 @@ APP_NAME = "pi"
 CONFIG_DIR_NAME = ".pi"
 ENV_AGENT_DIR = "PI_CODING_AGENT_DIR"
 DEFAULT_MODEL = "gpt-4o-mini"
+ANTHROPIC_API_VERSION = "2023-06-01"
 
 
 @dataclass(frozen=True)
 class ProviderDefaults:
     base_url: str
     env_vars: tuple[str, ...]
+    default_model: str | None = None
     default_headers: dict[str, str] = field(default_factory=dict)
 
 
-OPENAI_COMPAT_PROVIDERS: dict[str, ProviderDefaults] = {
+PROVIDER_DEFAULTS: dict[str, ProviderDefaults] = {
     "openai": ProviderDefaults("https://api.openai.com/v1", ("OPENAI_API_KEY",)),
+    "anthropic": ProviderDefaults(
+        "https://api.anthropic.com/v1",
+        ("ANTHROPIC_API_KEY",),
+        default_model="claude-sonnet-4-5",
+        default_headers={"anthropic-version": ANTHROPIC_API_VERSION},
+    ),
+    "claude": ProviderDefaults(
+        "https://api.anthropic.com/v1",
+        ("ANTHROPIC_API_KEY",),
+        default_model="claude-sonnet-4-5",
+        default_headers={"anthropic-version": ANTHROPIC_API_VERSION},
+    ),
     "openrouter": ProviderDefaults(
         "https://openrouter.ai/api/v1",
         ("OPENROUTER_API_KEY",),
-        {"HTTP-Referer": "https://github.com/badlogic/pi-mono", "X-Title": "pipi"},
+        default_headers={"HTTP-Referer": "https://github.com/badlogic/pi-mono", "X-Title": "pipi"},
     ),
     "groq": ProviderDefaults("https://api.groq.com/openai/v1", ("GROQ_API_KEY",)),
     "xai": ProviderDefaults("https://api.x.ai/v1", ("XAI_API_KEY",)),
@@ -60,7 +74,7 @@ def get_default_session_dir(cwd: str | Path) -> Path:
 
 
 def _resolve_provider_defaults(provider: str) -> ProviderDefaults:
-    return OPENAI_COMPAT_PROVIDERS.get(provider, OPENAI_COMPAT_PROVIDERS["openai"])
+    return PROVIDER_DEFAULTS.get(provider, PROVIDER_DEFAULTS["openai"])
 
 
 def resolve_api_key(provider: str, explicit_api_key: str | None = None, base_url: str | None = None) -> str:
@@ -90,7 +104,7 @@ def resolve_model_config(
 ) -> ModelConfig:
     resolved_provider = provider or os.environ.get("PI_PY_PROVIDER", "openai")
     defaults = _resolve_provider_defaults(resolved_provider)
-    resolved_model = model or os.environ.get("PI_PY_MODEL", DEFAULT_MODEL)
+    resolved_model = model or os.environ.get("PI_PY_MODEL") or defaults.default_model or DEFAULT_MODEL
     resolved_base_url = base_url or os.environ.get("PI_PY_BASE_URL") or defaults.base_url
     resolved_api_key = resolve_api_key(resolved_provider, api_key, resolved_base_url)
     return ModelConfig(

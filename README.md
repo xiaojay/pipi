@@ -12,7 +12,7 @@
 
 当前目标不是完整复刻原版 `pi`，而是先把最核心、最可运行的一条链路落下来：
 
-- 基于 OpenAI-compatible 接口的 agent 循环
+- 基于 OpenAI-compatible 接口和 Claude Messages API 的 agent 循环
 - 工具调用
 - JSONL 会话持久化
 - 简单 CLI / REPL
@@ -20,6 +20,7 @@
 ## 当前已经实现
 
 - OpenAI-compatible LLM 客户端
+- Anthropic Claude Messages API 客户端
 - 支持工具调用的 agent 主循环
 - JSONL session 持久化
 - 基于 `id` / `parentId` 的树形会话结构
@@ -58,12 +59,16 @@
 
 ## 运行前提
 
-这个版本当前只支持 **OpenAI-compatible** 接口。
+这个版本当前支持两类接口：
+
+- OpenAI-compatible Chat Completions
+- Anthropic Claude Messages API
 
 你需要满足下面任一条件：
 
 1. 有可用的 OpenAI-compatible 在线接口
 2. 有本地兼容服务，例如 Ollama、vLLM、LiteLLM 等
+3. 有可用的 Anthropic API key
 
 如果接口不支持 function calling / tool calling，这个 agent 只能退化为普通对话，无法完整使用工具链。
 
@@ -84,6 +89,12 @@ python3 -m pipi --help
 # 单次执行
 python3 -m pipi --print "Summarize this repository"
 
+# 使用 Claude API
+python3 -m pipi \
+  --provider anthropic \
+  --model claude-sonnet-4-5 \
+  --print "Summarize this repository"
+
 # 指定本地兼容接口
 python3 -m pipi \
   --provider local \
@@ -99,6 +110,16 @@ python3 -m pipi
 ```bash
 export OPENAI_API_KEY=...
 python3 -m pipi --print "Explain this repository"
+```
+
+如果使用 Claude API：
+
+```bash
+export ANTHROPIC_API_KEY=...
+python3 -m pipi \
+  --provider anthropic \
+  --model claude-sonnet-4-5 \
+  --print "Explain this repository"
 ```
 
 如果你想作为独立项目安装：
@@ -117,7 +138,7 @@ pipi --help
 ## 目录说明
 
 - `pipi/agent.py`：agent 主循环
-- `pipi/llm.py`：OpenAI-compatible 客户端
+- `pipi/llm.py`：OpenAI-compatible / Claude API 客户端
 - `pipi/session.py`：JSONL 会话和树结构管理
 - `pipi/cli.py`：命令行入口和 REPL
 - `pipi/tools/`：内置工具实现

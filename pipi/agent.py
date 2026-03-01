@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .config import ModelConfig
-from .llm import LLMResponse, OpenAICompatClient
+from .llm import LLMClient, LLMResponse, create_llm_client
 from .session import SessionManager
 from .types import ChatMessage, ContentPart, ToolExecutionResult, text_part
 from .tools import ToolDefinition, build_builtin_tools
@@ -22,14 +22,14 @@ class CodingAgent:
         *,
         model: ModelConfig,
         session_manager: SessionManager,
-        llm_client: OpenAICompatClient | None = None,
+        llm_client: LLMClient | None = None,
         system_prompt: str | None = None,
         tools: dict[str, ToolDefinition] | None = None,
         max_tool_rounds: int = 12,
     ) -> None:
         self.model = model
         self.session_manager = session_manager
-        self.llm_client = llm_client or OpenAICompatClient()
+        self.llm_client = llm_client or create_llm_client(model)
         self.system_prompt = system_prompt or self.default_system_prompt()
         self.max_tool_rounds = max_tool_rounds
         self.tools = tools or build_builtin_tools(self.session_manager.cwd)
@@ -82,6 +82,7 @@ class CodingAgent:
 
     def set_model(self, model: ModelConfig) -> None:
         self.model = model
+        self.llm_client = create_llm_client(model)
         self.session_manager.append_model_change(model.provider, model.model)
         self.session_manager.append_thinking_level_change(model.thinking_level)
 

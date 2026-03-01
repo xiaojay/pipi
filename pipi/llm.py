@@ -4,7 +4,7 @@ import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from .config import ModelConfig
 from .types import ChatMessage, ToolCall
@@ -19,10 +19,34 @@ class LLMResponse:
     raw: dict[str, Any]
 
 
-class OpenAICompatClient:
+class LLMClient(Protocol):
+    def complete(
+        self,
+        *,
+        model: ModelConfig,
+        system_prompt: str,
+        messages: list[ChatMessage],
+        tools: list[dict[str, Any]],
+    ) -> LLMResponse: ...
+
+
+class _JSONHTTPClient:
     def __init__(self, timeout: float = 300.0) -> None:
         self.timeout = timeout
 
+    def _post_json(self, *, url: str, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            url=url,
+            data=body,
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+
+class OpenAICompatClient(_JSONHTTPClient):
     def complete(
         self,
         *,
@@ -44,16 +68,14 @@ class OpenAICompatClient:
         try:
             raw = self._perform_request(model, payload)
         except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")
-            error.close()
+            detail = _read_http_error_detail(error)
             if self._should_retry_without_reasoning(error.code, detail, payload):
                 retry_payload = dict(payload)
                 retry_payload.pop("reasoning_effort", None)
                 try:
                     raw = self._perform_request(model, retry_payload)
                 except urllib.error.HTTPError as retry_error:
-                    retry_detail = retry_error.read().decode("utf-8", errors="replace")
-                    retry_error.close()
+                    retry_detail = _read_http_error_detail(retry_error)
                     raise RuntimeError(f"LLM request failed with HTTP {retry_error.code}: {retry_detail}") from retry_error
                 except urllib.error.URLError as retry_error:
                     raise RuntimeError(f"LLM request failed: {retry_error.reason}") from retry_error
@@ -64,20 +86,16 @@ class OpenAICompatClient:
         return self._parse_response(raw)
 
     def _perform_request(self, model: ModelConfig, payload: dict[str, Any]) -> dict[str, Any]:
-        body = json.dumps(payload).encode("utf-8")
         headers = {
             "Authorization": f"Bearer {model.api_key}",
             "Content-Type": "application/json",
             **model.headers,
         }
-        request = urllib.request.Request(
+        return self._post_json(
             url=f"{model.base_url}/chat/completions",
-            data=body,
             headers=headers,
-            method="POST",
+            payload=payload,
         )
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
 
     def _should_retry_without_reasoning(self, status_code: int, detail: str, payload: dict[str, Any]) -> bool:
         if status_code != 400:
@@ -188,3 +206,190 @@ class OpenAICompatClient:
             "xhigh": "high",
         }
         return mapping.get(thinking_level)
+
+
+class AnthropicClient(_JSONHTTPClient):
+    DEFAULT_MAX_TOKENS = 4096
+
+    def complete(
+        self,
+        *,
+        model: ModelConfig,
+        system_prompt: str,
+        messages: list[ChatMessage],
+        tools: list[dict[str, Any]],
+    ) -> LLMResponse:
+        payload: dict[str, Any] = {
+            "model": model.model,
+            "max_tokens": self.DEFAULT_MAX_TOKENS,
+            "messages": self._convert_messages(messages),
+        }
+        if system_prompt:
+            payload["system"] = system_prompt
+        if tools:
+            payload["tools"] = self._convert_tools(tools)
+            payload["tool_choice"] = {"type": "auto"}
+        try:
+            raw = self._perform_request(model, payload)
+        except urllib.error.HTTPError as error:
+            detail = _read_http_error_detail(error)
+            raise RuntimeError(f"LLM request failed with HTTP {error.code}: {detail}") from error
+        except urllib.error.URLError as error:
+            raise RuntimeError(f"LLM request failed: {error.reason}") from error
+        return self._parse_response(raw)
+
+    def _perform_request(self, model: ModelConfig, payload: dict[str, Any]) -> dict[str, Any]:
+        headers = {
+            "x-api-key": model.api_key,
+            "Content-Type": "application/json",
+            **model.headers,
+        }
+        return self._post_json(
+            url=f"{model.base_url}/messages",
+            headers=headers,
+            payload=payload,
+        )
+
+    def _convert_messages(self, messages: list[ChatMessage]) -> list[dict[str, Any]]:
+        converted: list[dict[str, Any]] = []
+        pending_tool_results: list[dict[str, Any]] = []
+
+        def flush_tool_results() -> None:
+            nonlocal pending_tool_results
+            if not pending_tool_results:
+                return
+            converted.append({"role": "user", "content": pending_tool_results})
+            pending_tool_results = []
+
+        for message in messages:
+            if message.role == "toolResult":
+                pending_tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": message.tool_call_id or "",
+                        "content": self._convert_tool_result_content(message.content),
+                        "is_error": self._is_tool_error(message),
+                    }
+                )
+                continue
+
+            flush_tool_results()
+            if message.role == "user":
+                converted.append({"role": "user", "content": self._convert_content(message.content)})
+            elif message.role == "assistant":
+                converted.append({"role": "assistant", "content": self._convert_assistant_content(message)})
+
+        flush_tool_results()
+        return converted
+
+    def _convert_content(self, content: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        converted: list[dict[str, Any]] = []
+        for part in content:
+            if part.get("type") == "text":
+                converted.append({"type": "text", "text": part.get("text", "")})
+            elif part.get("type") == "image":
+                converted.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": part.get("mime_type", "image/png"),
+                            "data": part.get("data", ""),
+                        },
+                    }
+                )
+        return converted
+
+    def _convert_assistant_content(self, message: ChatMessage) -> list[dict[str, Any]]:
+        content = self._convert_content(message.content)
+        for tool_call in message.tool_calls:
+            content.append(
+                {
+                    "type": "tool_use",
+                    "id": tool_call.id,
+                    "name": tool_call.name,
+                    "input": tool_call.arguments,
+                }
+            )
+        return content
+
+    def _convert_tool_result_content(self, content: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
+        if all(part.get("type") == "text" for part in content):
+            return "".join(part.get("text", "") for part in content)
+        return self._convert_content(content)
+
+    def _convert_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        converted: list[dict[str, Any]] = []
+        for tool in tools:
+            function = tool.get("function") or {}
+            converted.append(
+                {
+                    "name": str(function.get("name") or ""),
+                    "description": str(function.get("description") or ""),
+                    "input_schema": dict(function.get("parameters") or {}),
+                }
+            )
+        return converted
+
+    def _parse_response(self, raw: dict[str, Any]) -> LLMResponse:
+        text_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        for item in raw.get("content") or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text":
+                text_parts.append(str(item.get("text") or ""))
+            elif item.get("type") == "tool_use":
+                raw_input = item.get("input")
+                arguments = raw_input if isinstance(raw_input, dict) else {}
+                tool_calls.append(
+                    ToolCall(
+                        id=str(item.get("id") or ""),
+                        name=str(item.get("name") or ""),
+                        arguments=arguments,
+                    )
+                )
+        return LLMResponse(
+            text="".join(text_parts),
+            tool_calls=tool_calls,
+            stop_reason=str(raw.get("stop_reason") or "") or None,
+            usage=_normalize_anthropic_usage(raw.get("usage")),
+            raw=raw,
+        )
+
+    def _is_tool_error(self, message: ChatMessage) -> bool:
+        text = message.text()
+        return text.startswith("Unknown tool:") or text.startswith(f"Tool {message.tool_name} failed:")
+
+
+def create_llm_client(model: ModelConfig, timeout: float = 300.0) -> LLMClient:
+    if model.provider in {"anthropic", "claude"}:
+        return AnthropicClient(timeout=timeout)
+    return OpenAICompatClient(timeout=timeout)
+
+
+def _read_http_error_detail(error: urllib.error.HTTPError) -> str:
+    detail = error.read().decode("utf-8", errors="replace")
+    error.close()
+    return detail
+
+
+def _normalize_anthropic_usage(raw_usage: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_usage, dict):
+        return None
+    usage = dict(raw_usage)
+    input_tokens = _int_or_zero(usage.get("input_tokens"))
+    output_tokens = _int_or_zero(usage.get("output_tokens"))
+    usage.setdefault("prompt_tokens", input_tokens)
+    usage.setdefault("completion_tokens", output_tokens)
+    usage.setdefault("total_tokens", input_tokens + output_tokens)
+    return usage
+
+
+def _int_or_zero(value: Any) -> int:
+    if isinstance(value, int):
+        return value
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0

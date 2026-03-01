@@ -17,9 +17,13 @@ def build_parser() -> argparse.ArgumentParser:
         description="Python port of the pi coding-agent core.",
     )
     parser.add_argument("messages", nargs="*", help="Prompt text")
-    parser.add_argument("--provider", default=None, help="Provider name (openai, openrouter, groq, local)")
+    parser.add_argument(
+        "--provider",
+        default=None,
+        help="Provider name (openai, anthropic, claude, openrouter, groq, local)",
+    )
     parser.add_argument("--model", default=None, help="Model id")
-    parser.add_argument("--base-url", default=None, help="OpenAI-compatible base URL")
+    parser.add_argument("--base-url", default=None, help="Provider base URL override")
     parser.add_argument("--api-key", default=None, help="API key")
     parser.add_argument("--thinking", default="medium", help="Thinking level metadata")
     parser.add_argument("--system-prompt", default=None, help="Override system prompt")
