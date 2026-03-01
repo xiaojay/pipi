@@ -2,8 +2,8 @@
 """Browse and view pipi sessions as HTML in your browser.
 
 Usage:
-    python -m pipi.view_sessions          # list recent sessions, pick one
-    python -m pipi.view_sessions <path>   # view a specific .jsonl file
+    python3 scripts/view_sessions.py          # list recent sessions, pick one
+    python3 scripts/view_sessions.py <path>   # view a specific .jsonl file
 """
 
 import base64

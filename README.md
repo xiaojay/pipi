@@ -5,6 +5,7 @@
 它最初来自这个 monorepo 里对 `packages/coding-agent` 核心链路的重写，现在已经整理成独立代码库结构：
 
 - `pipi/`：实际 Python 包
+- `scripts/`：外围辅助脚本
 - `tests/`：项目内测试
 - `pyproject.toml`：项目元数据
 
@@ -143,6 +144,7 @@ pipi --help
 - `pipi/cli.py`：命令行入口和 REPL
 - `pipi/tools/`：内置工具实现
 - `pipi/file_args.py`：`@file` 文件附件处理
+- `scripts/view_sessions.py`：session 浏览脚本
 - `tests/`：项目测试
 
 ## 当前定位
